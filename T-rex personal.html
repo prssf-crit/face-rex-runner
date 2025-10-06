@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Face-Rex Runner — Levels Edition</title>
+  <meta name="description" content="A tiny runner game with levelled difficulty, your face as the hero, and Mario-style left/right movement." />
+  <style>
+    /* ---------- Minimal, responsive UI (dark-mode aware) ---------- */
+    :root{ --bg:#f7f7f7; --fg:#111; --muted:#888; --accent:#4b7cf5; --danger:#e74c3c; }
+    @media (prefers-color-scheme: dark){
+      :root{ --bg:#0e0f12; --fg:#f0f3f8; --muted:#9aa4b2; --accent:#6da3ff; --danger:#ff6b5a; }
+    }
+    *{ box-sizing:border-box }
+    html,body{ height:100% }
+    body{
+      margin:0; background:var(--bg); color:var(--fg);
+      font:16px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif;
+      display:grid; place-items:center;
+    }
+    .wrap{ width:min(920px,92vw); }
+    header{ display:flex; align-items:center; justify-content:space-between; gap:12px; margin:18px 0; }
+    .brand{ display:flex; align-items:center; gap:10px }
+    .brand h1{ font-size:20px; margin:0 }
+    .controls{ display:flex; flex-wrap:wrap; gap:10px; align-items:center }
+    .controls > *{
+      border:1px solid color-mix(in oklab, var(--muted) 40%, transparent);
+      background:transparent; border-radius:12px; padding:8px 12px; color:var(--fg)
+    }
+    button{ cursor:pointer }
+    button.primary{ border-color:var(--accent) }
+    button.danger{ border-color:var(--danger) }
+    #game{
+      width:100%; aspect-ratio:16/9; border-radius:16px;
+      border:1px solid color-mix(in oklab, var(--muted) 40%, transparent);
+      background:var(--bg); display:block;
+    }
+    .hud{ display:flex; justify-content:space-between; align-items:center; margin:10px 0; color:var(--muted); gap:8px; flex-wrap:wrap }
+    .hud .row{ display:flex; gap:12px; align-items:center }
+    .kbd{
+      font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      border:1px solid color-mix(in oklab, var(--muted) 40%, transparent);
+      padding:0 6px; border-radius:6px; font-size:0.95em
+    }
+    footer{ margin:12px 0; color:var(--muted); font-size:0.95em }
+    .mobile-cta{ display:none }
+    @media (max-width:700px){ .mobile-cta{ display:inline } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="brand">
+        <!-- Small glyph for flavour -->
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+          <path d="M4 20h6v-2H6v-2h4v-2H6v-2h6V6h2a4 4 0 0 0 4-4h2v2a4 4 0 0 1-4 4h-2v4h2l4 2v2h-2l-2 2v2h-4v2H4v-2Z" fill="currentColor"/>
+        </svg>
+        <h1>Face-Rex Runner — Levels</h1>
+      </div>
+      <div class="controls">
+        <label class="kbd" for="file">Upload face</label>
+        <input id="file" type="file" accept="image/*" style="display:none" />
+        <button id="btnStart" class="primary">Start (Space)</button>
+        <button id="btnPause">Pause (P)</button>
+        <button id="btnReset" class="danger">Reset (R)</button>
+      </div>
+    </header>
+
+    <canvas id="game" role="img" aria-label="Endless runner game canvas"></canvas>
+
+    <div class="hud" aria-live="polite" aria-atomic="true">
+      <div class="row">
+        Score: <span id="score">0</span>
+        • Best: <span id="best">0</span>
+        • Level: <span id="level">1</span>
+        • Speed: <span id="speed">1.00x</span>
+      </div>
+      <div class="row">
+        <span class="kbd">Space/▲</span> Jump
+        <span class="kbd">←/→</span> Move
+        <span class="kbd">P</span> Pause
+        <span class="kbd">R</span> Reset
+        <span class="kbd mobile-cta">Tap to jump</span>
+      </div>
+    </div>
+
+    <footer>
+      Your face texture is used only locally in your browser (never uploaded). Game inspired by Chrome’s offline T-Rex.
+    </footer>
+  </div>
+
+<script>
+/* ============================================================================
+   Face-Rex Runner — Levels Edition
+   - Deterministic difficulty: each new level increases exactly one variable
+     (speed OR obstacle size OR obstacle frequency), chosen randomly but never
+     the same variable twice in a row.
+   - Physics constraints ensure obstacles remain jumpable based on gravity &
+     jump velocity (no impossible walls).
+   - Player can move left/right (Mario-like) to modulate relative speed.
+============================================================================ */
+
+(function(){
+  /* ---------- Canvas + DPI setup ---------- */
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const DPR = Math.min(window.devicePixelRatio || 1, 1.5); // cap DPR for perf
+  function size(){
+    const w = canvas.clientWidth;
+    const h = Math.round(w * 9/16);
+    canvas.width  = Math.floor(w * DPR);
+    canvas.height = Math.floor(h * DPR);
+    ctx.setTransform(DPR,0,0,DPR,0,0);  // draw in CSS pixels
+  }
+  addEventListener('resize', size, {passive:true});
+  size();
+
+  /* ---------- UI elements ---------- */
+  const scoreEl = document.getElementById('score');
+  const bestEl  = document.getElementById('best');
+  const levelEl = document.getElementById('level');
+  const speedEl = document.getElementById('speed');
+  const fileInput = document.getElementById('file');
+  const btnStart = document.getElementById('btnStart');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+
+  /* ---------- Theme + colours ---------- */
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  const COLORS = {
+    ground:'#bdbdbd', sky:'#e9ecef', skyDark:'#15181e',
+    text:'#111', textDark:'#f3f6fb', cactus:'#2e7d32', cloud:'#cbd5e1'
+  };
+
+  /* ---------- Physics constants (tune feel here) ---------- */
+  const G = 2200;              // gravity (px/s^2)
+  const JUMP_VY = -780;        // initial jump velocity (px/s, negative = up)
+  const MOVE_SPEED = 240;      // horizontal player speed (px/s)
+  const DINO_BASE = { w:56, h:64 }; // base sprite size (CSS pixels)
+  const GROUND_Y = () => canvas.height / DPR - 80; // ground baseline (CSS px)
+
+  // Compute theoretical jump reach from kinematics: v^2 / (2g)
+  const MAX_JUMP_REACH = (JUMP_VY*JUMP_VY) / (2*G); // vertical delta (px)
+  const JUMP_SAFETY = 0.88;     // keep obstacles below this fraction of reach
+
+  /* ---------- Entities / state ---------- */
+  const DINO = {
+    w: DINO_BASE.w, h: DINO_BASE.h,
+    x: 120, y: 0, vy: 0, onGround: true, vx: 0   // vx from user input
+  };
+
+  let obstacles = []; // array of {x,y,w,h}
+  let clouds = [];    // decorative background
+  let running = false, paused = false, gameOverFlag = false;
+
+  let score = 0;
+  let best = Number(localStorage.getItem('facetrex_best')||0);
+  bestEl.textContent = best;
+
+  /* ---------- Difficulty & levels ---------- */
+  let level = 1;                 // current level (starts at 1)
+  let lastLevelUpScore = 0;      // score at previous level up
+  const LEVEL_INTERVAL = 300;    // points per level
+  levelEl.textContent = level;
+
+  // Base difficulty parameters — these will be scaled by level
+  const INITIAL_BASE_SPEED = 240; // was 480 — start slower
+  let baseSpeed = INITIAL_BASE_SPEED;
+  let speedMult   = 1.00;        // multiplicative speed scaler
+  // Obstacle height range (per level), hard-capped by jump physics
+  let obsHMin     = 40;          // min obstacle height (px)
+  let obsHMax     = Math.min(82, Math.floor(MAX_JUMP_REACH*JUMP_SAFETY)); // px
+  // Distance between obstacles as a range (per level)
+  let spawnGapMin = 260;         // minimum gap between obstacles (px)
+  let spawnGapMax = 420;         // maximum gap (px)
+
+  // Obstacle clusters (occasional 2-3 obstacles packed closer together)
+  let clusterChance   = 0.22;  // ~22% of spawns become clusters
+  let clusterMaxCount = 3;     // up to 3 obstacles in a cluster
+  let clusterGapMin   = 12;    // was 26 → tighter
+  let clusterGapMax   = 24;    // was 48 → tighter
+
+  // Enforce non-decreasing progression by raising exactly ONE parameter at a
+  // time per level. Track which variable we increased last to avoid repeats.
+  const VARS = ['speed','size','frequency'];
+  let lastIncreased = null;
+
+  function nextLevel(){
+    level += 1; levelEl.textContent = level; lastLevelUpScore = Math.floor(score);
+
+    // Choose a variable to increase that isn't the same as last time
+    const choices = VARS.filter(v => v !== lastIncreased);
+    const pick = choices[Math.floor(Math.random()*choices.length)];
+    lastIncreased = pick;
+
+    if(pick === 'speed'){
+    // Slightly faster world each level (capped)
+    speedMult = Math.min(speedMult + 0.08, 2.0);
+    } else if(pick === 'size'){
+    // Widen the obstacle height *range*, but keep it jumpable
+    const jumpCap = Math.floor(MAX_JUMP_REACH*JUMP_SAFETY);
+    obsHMax = Math.min(jumpCap, obsHMax + 6);           // push ceiling up a bit
+    obsHMin = Math.min(obsHMax - 10, obsHMin + 2);      // nudge floor up (kept below max)
+    } else if(pick === 'frequency'){
+      clusterChance = Math.min(0.55, clusterChance + 0.05);    // more clusters
+      clusterGapMin = Math.max(8,  clusterGapMin - 3);         // tighter inner gaps
+      clusterGapMax = Math.max(clusterGapMin + 12, clusterGapMax - 3);
+
+      // Between-cluster gaps also shrink slightly
+      spawnGapMin = Math.max(180, spawnGapMin - 16);
+      spawnGapMax = Math.max(spawnGapMin + 120, spawnGapMax - 12);
+    }
+  }
+
+  /* ---------- Face texture (local only) ---------- */
+  let faceImg = null;                 // Image used for the player
+  const faceCanvas = document.createElement('canvas');
+  const faceCtx = faceCanvas.getContext('2d');
+
+  function setDefaultFace(){
+    faceCanvas.width = 128; faceCanvas.height = 128;
+    faceCtx.clearRect(0,0,128,128);
+    const grad = faceCtx.createLinearGradient(0,0,128,128);
+    grad.addColorStop(0,'#6da3ff'); grad.addColorStop(1,'#4b7cf5');
+    faceCtx.fillStyle = grad;
+    faceCtx.beginPath(); faceCtx.arc(64,64,60,0,Math.PI*2); faceCtx.fill();
+    faceCtx.fillStyle = '#fff';
+    faceCtx.font = 'bold 36px system-ui';
+    faceCtx.textAlign = 'center'; faceCtx.textBaseline = 'middle';
+    faceCtx.fillText('YOU',64,68);
+    faceImg = new Image();
+    faceImg.src = faceCanvas.toDataURL('image/png');
+  }
+  setDefaultFace();
+
+  // Handle user-uploaded face image (stays local; never leaves browser)
+  document.getElementById('file').addEventListener('change', (e)=>{
+    const file = e.target.files && e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = ()=>{
+      const img = new Image();
+      img.onload = ()=>{
+        const s = Math.min(img.width, img.height);
+        faceCanvas.width = 128; faceCanvas.height = 128;
+        faceCtx.clearRect(0,0,128,128);
+        faceCtx.save();
+        faceCtx.beginPath(); faceCtx.arc(64,64,60,0,Math.PI*2); faceCtx.clip();
+        faceCtx.drawImage(img, (img.width-s)/2, (img.height-s)/2, s, s, 0,0,128,128);
+        faceCtx.restore();
+        faceImg = new Image();
+        faceImg.src = faceCanvas.toDataURL('image/png');
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+  });
+
+  /* ---------- Helpers ---------- */
+  function randRange(a,b){ return a + Math.random()*(b-a); }
+  function rectsIntersect(ax,ay,aw,ah, bx,by,bw,bh){
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+  }
+
+  /* ---------- Spawners ---------- */
+  function spawnCactus(worldX){
+    const jumpCap = Math.floor(MAX_JUMP_REACH*JUMP_SAFETY);
+    const Hmin = Math.max(40, Math.min(obsHMin, jumpCap));
+    const Hmax = Math.max(Hmin + 4, Math.min(obsHMax, jumpCap));
+    const h = Math.floor(randRange(Hmin, Hmax));
+    const w = Math.floor(16 + (h-40)*0.28);
+
+    const o = { x: worldX, y: GROUND_Y() - h, w, h };
+    obstacles.push(o);
+    return o; // <-- return it so the caller can use its width/pos
+  }
+
+  function spawnObstacleCluster(startX){
+    // Decide count (1 by default; often 2, sometimes 3)
+    let count = 1;
+    if (Math.random() < clusterChance) {
+      count = Math.min(clusterMaxCount, 2 + (Math.random() < 0.5 ? 0 : 1));
+    }
+
+    // Hard cap on the total horizontal span of the cluster (in CSS px).
+    // This keeps clusters visually tight and avoids stretching half the screen.
+    const CLUSTER_SPAN_MAX = 220;  // tweak 200–260 to taste
+
+    let x = startX;
+    let usedSpan = 0;
+
+    for (let i = 0; i < count; i++) {
+      // Spawn one cactus at current x
+      const o = spawnCactus(x);
+
+      // Update used span with this obstacle’s width
+      usedSpan += o.w;
+
+      // If not last obstacle, compute next gap but keep the whole cluster ≤ span cap
+      if (i < count - 1) {
+        // Random inner gap (tight range)
+        let gap = randRange(clusterGapMin, clusterGapMax);
+
+        // If the remaining span would be exceeded, squeeze this gap
+        const remaining = CLUSTER_SPAN_MAX - usedSpan;
+        // Leave at least 40px buffer for the *next* obstacle’s width on average
+        const minReserve = 40;
+        if (remaining - gap < minReserve) {
+          gap = Math.max(8, remaining - minReserve);  // never less than 8px
+        }
+
+        // Apply gap and advance x
+        x = o.x + o.w + gap;
+        usedSpan += gap;
+      }
+    }
+  }
+
+
+
+  function spawnCloud(worldX){
+    const y = 40 + Math.random()*120;
+    const s = 36 + Math.random()*44;
+    clouds.push({ x: worldX, y, w: s, h: s*0.6, v: 35+Math.random()*22 });
+  }
+
+  /* ---------- Input: jump + horizontal movement ---------- */
+  let keyLeft=false, keyRight=false;
+  function jump(){
+    if(!running){ start(); return; }
+    if(paused || gameOverFlag) return;
+    if(DINO.onGround){ DINO.vy = JUMP_VY; DINO.onGround = false; }
+  }
+
+  addEventListener('keydown', (e)=>{
+    if(e.code==='Space' || e.code==='ArrowUp'){ e.preventDefault();
+      if(gameOverFlag){ reset(); start(); } else { jump(); } }
+    if(e.code==='ArrowLeft' || e.key==='a' || e.key==='A'){ keyLeft = true; }
+    if(e.code==='ArrowRight'|| e.key==='d' || e.key==='D'){ keyRight = true; }
+    if(e.key==='p' || e.key==='P'){ togglePause(); }
+    if(e.key==='r' || e.key==='R'){ reset(); }
+  });
+  addEventListener('keyup', (e)=>{
+    if(e.code==='ArrowLeft' || e.key==='a' || e.key==='A'){ keyLeft = false; }
+    if(e.code==='ArrowRight'|| e.key==='d' || e.key==='D'){ keyRight = false; }
+  });
+  canvas.addEventListener('pointerdown', ()=>{
+    if(gameOverFlag){ reset(); start(); } else { jump(); }
+  });
+  btnStart.addEventListener('click', ()=> start());
+  btnPause.addEventListener('click', ()=> togglePause());
+  btnReset.addEventListener('click', ()=> reset());
+
+  /* ---------- Loop & game state ---------- */
+  let last = performance.now();
+  let worldScrollX = 0; // cumulative world scroll (for spawn spacing)
+
+  function start(){
+    gameOverFlag = false; paused = false; running = true; last = performance.now();
+    requestAnimationFrame(loop);
+  }
+  function togglePause(){
+    if(!running) return;
+    paused = !paused;
+    if(!paused){ last = performance.now(); requestAnimationFrame(loop); }
+    draw();
+  }
+  function reset(){
+    obstacles = []; clouds = [];
+    running = false; paused = false; gameOverFlag = false;
+    score = 0; level = 1; levelEl.textContent = level; lastLevelUpScore = 0;
+    baseSpeed = INITIAL_BASE_SPEED;
+    speedMult = 1.00;
+    obsHMin = 40;
+    obsHMax = Math.min(82, Math.floor(MAX_JUMP_REACH*JUMP_SAFETY));
+    spawnGapMin = 260; spawnGapMax = 420;
+    clusterChance = 0.22; clusterMaxCount = 3;
+    clusterGapMin = 26; clusterGapMax = 48;
+    lastSpawnX = 0; lastIncreased = null;
+    DINO.w = DINO_BASE.w; DINO.h = DINO_BASE.h;
+    DINO.x = 120; DINO.y = GROUND_Y()-DINO.h; DINO.vy = 0; DINO.onGround = true; DINO.vx = 0;
+    worldScrollX = 0;
+    // Seed some clouds so it doesn't look empty
+    spawnCloud(40 + randRange(100,200));
+    spawnCloud(40 + randRange(200,360));
+    updateHUD(); draw();
+  }
+  function updateHUD(){
+    scoreEl.textContent = Math.floor(score);
+    bestEl.textContent = best;
+    // Show effective speed multiplier compared to base
+    const effectiveSpeed = baseSpeed*speedMult;
+    speedEl.textContent = (effectiveSpeed / INITIAL_BASE_SPEED).toFixed(2) + "x";
+  }
+
+  function loop(now){
+    if(!running || paused) return;
+    const dt = Math.min(0.04, (now-last)/1000); last = now;
+
+    /* --- Horizontal input → player velocity --- */
+    const moveDir = (keyRight?1:0) - (keyLeft?1:0);
+    DINO.vx = moveDir * MOVE_SPEED;                         // player local vx
+    // Constrain within screen (leave some margin on both sides)
+    const margin = 40;
+    const W = canvas.width / DPR;
+    DINO.x = Math.max(margin, Math.min(W - margin - DINO.w, DINO.x));
+
+    /* --- Vertical physics (jump/fall) --- */
+    DINO.vy += G*dt;                                        // gravity
+    DINO.y  += DINO.vy * dt;                                // integrate
+    if(DINO.y >= GROUND_Y()-DINO.h){                        // snap to ground
+      DINO.y = GROUND_Y()-DINO.h; DINO.vy=0; DINO.onGround=true;
+    }
+
+    /* --- World scroll (camera fixed) --- */
+    const worldSpeed = Math.min(980, baseSpeed * speedMult); // constant camera scroll
+    const relativeScroll = worldSpeed;                        // keep var for downstream uses
+    worldScrollX += relativeScroll * dt;                      // accumulate for spawning
+
+    // Player horizontal control (Mario-style in world space)
+    DINO.x += DINO.vx * dt;
+
+    /* --- Score + levels --- */
+    score += dt * (relativeScroll/7);                       // pace with speed
+    if(score - lastLevelUpScore >= LEVEL_INTERVAL){         // time to level up
+      nextLevel();
+    }
+
+    /* --- Spawn obstacles/clusters with a guaranteed min gap in WORLD space --- */
+    if (worldScrollX - lastSpawnX >= randRange(spawnGapMin, spawnGapMax)) {
+      spawnObstacleCluster(W + 40); // may spawn 1, 2, or 3 depending on clusterChance
+      lastSpawnX = worldScrollX;
+    }
+
+    /* --- Update entities in SCREEN space (subtract relative scroll) --- */
+    for(let i=0;i<obstacles.length;i++){ obstacles[i].x -= relativeScroll * dt; }
+    obstacles = obstacles.filter(o => o.x + o.w > -30);     // cull off-screen
+
+    // Clouds drift slowly regardless of worldSpeed for nice parallax
+    for(let i=0;i<clouds.length;i++){ clouds[i].x -= clouds[i].v * dt; }
+    clouds = clouds.filter(c => c.x + c.w > -30);
+    if(clouds.length < 4 && Math.random() < 0.02){ spawnCloud(W + 60); }
+
+    /* --- Collision --- */
+    for(let i=0;i<obstacles.length;i++){
+      const o = obstacles[i];
+      if(rectsIntersect(DINO.x+6, DINO.y, DINO.w-12, DINO.h-6, o.x, o.y, o.w, o.h)){
+        gameOver(); return;
+      }
+    }
+
+    /* --- Draw + HUD --- */
+    draw();
+    updateHUD();
+
+    requestAnimationFrame(loop);
+  }
+
+  /* ---------- Drawing ---------- */
+  function draw(){
+    const W = canvas.width / DPR, H = canvas.height / DPR;
+
+    // Background sky
+    ctx.fillStyle = dark ? COLORS.skyDark : COLORS.sky;
+    ctx.fillRect(0,0,W,H);
+
+    // Clouds
+    ctx.fillStyle = COLORS.cloud;
+    for(let i=0;i<clouds.length;i++){ const c=clouds[i]; roundedRect(c.x,c.y,c.w,c.h,12); ctx.fill(); }
+
+    // Ground line + ticks
+    const gy = GROUND_Y();
+    ctx.strokeStyle = COLORS.ground; ctx.lineWidth = 2; ctx.beginPath();
+    ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke();
+    const tickGap = 28; const offset = (performance.now()/12) % tickGap;
+    ctx.fillStyle = COLORS.ground;
+    for(let x = -offset; x < W; x += tickGap){ ctx.fillRect(x, gy+4, 12, 3); }
+
+    // Obstacles (cacti)
+    ctx.fillStyle = COLORS.cactus;
+    for(let i=0;i<obstacles.length;i++){ const o=obstacles[i]; drawCactus(o.x,o.y,o.w,o.h); }
+
+    // Player (face rectangle with tiny legs & eye)
+    drawFaceDino(DINO.x, DINO.y, DINO.w, DINO.h);
+
+    // Overlays
+    if(!running){
+      overlayMsg(gameOverFlag ? 'Game Over — press Space or Start' : 'Press Space or Tap to Start');
+    } else if(paused){
+      overlayMsg('Paused — press P to resume');
+    }
+  }
+
+  function overlayMsg(msg){
+    const W = canvas.width/DPR, H = canvas.height/DPR;
+    ctx.save();
+    ctx.globalAlpha = 0.85; ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+    ctx.globalAlpha = 1; ctx.fillStyle = '#fff';
+    ctx.font = '600 22px system-ui'; ctx.textAlign = 'center';
+    ctx.fillText(msg, W/2, H/2);
+    ctx.restore();
+  }
+
+  function drawFaceDino(x,y,w,h){
+    // Body filled with face texture (circular crop baked into faceImg)
+    ctx.save(); roundedRect(x,y,w,h,10); ctx.clip();
+    if(faceImg && faceImg.complete){
+      const pad = 4; ctx.drawImage(faceImg, x+pad, y+pad, w-pad*2, h-pad*2);
+    } else { ctx.fillStyle = '#777'; ctx.fill(); }
+    ctx.restore();
+
+    // Legs (simple alternating rectangles)
+    ctx.fillStyle = dark? COLORS.textDark : COLORS.text;
+    const legW = 8, legH = 12, phase = Math.sin(performance.now()/120);
+    ctx.fillRect(x+10,   y+h, legW, legH + (phase>0?2:0));
+    ctx.fillRect(x+w-18, y+h, legW, legH + (phase<0?2:0));
+
+    // Eye dot
+    ctx.beginPath(); ctx.arc(x+w-18, y+16, 3, 0, Math.PI*2); ctx.fill();
+  }
+
+  function drawCactus(x,y,w,h){
+    roundedRect(x,y,w,h,4); ctx.fill();
+    ctx.save(); ctx.globalAlpha=0.2; ctx.fillStyle = '#000';
+    for(let i=0;i<Math.floor(h/6);i++){ ctx.fillRect(x+4+(i%2)*4, y+i*6+2, 2, 4); }
+    ctx.restore();
+  }
+
+  function roundedRect(x,y,w,h,r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr,y);
+    ctx.arcTo(x+w,y,x+w,y+h,rr);
+    ctx.arcTo(x+w,y+h,x,y+h,rr);
+    ctx.arcTo(x,y+h,x,y,rr);
+    ctx.arcTo(x,y,x+w,y,rr);
+    ctx.closePath();
+  }
+
+  /* ---------- Game over ---------- */
+  function gameOver(){
+    running = false; gameOverFlag = true;
+    best = Math.max(best, Math.floor(score));
+    localStorage.setItem('facetrex_best', String(best));
+    draw(); updateHUD();
+  }
+
+  /* ---------- Boot ---------- */
+  reset(); // initialise everything
+
+})(); // IIFE
+</script>
+</body>
+</html>
